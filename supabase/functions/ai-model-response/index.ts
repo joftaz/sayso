@@ -74,97 +74,46 @@ const getMockResponse = (input: string): Array<{category: string; words: string[
   return mockResponses[input.toLowerCase()] || mockResponses["default"];
 };
 
-// Parse OpenAI response (same logic as in openaiService.ts)
+// Parse OpenAI response
 const parseOpenAIResponse = (content: string): Array<{category: string; words: string[]}> => {
   try {
-    // Try to parse JSON directly
-    const jsonResponse = JSON.parse(content);
-    
-    // Handle the new format with a "categories" wrapper
-    if (jsonResponse.categories && Array.isArray(jsonResponse.categories)) {
-      console.log("Found categories array in wrapper object");
-      return jsonResponse.categories.map(item => {
-        const categoryKey = Object.keys(item).find(key => key.match(/^category\d*$/));
-        
-        if (categoryKey && categoryKey !== "category" && Array.isArray(item.words)) {
-          return {
-            category: item[categoryKey],
-            words: item.words
-          };
-        }
-        
-        return item;
-      });
+    // Strip markdown code fences if present
+    let cleanContent = content.trim();
+    const fenceMatch = cleanContent.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+    if (fenceMatch) {
+      cleanContent = fenceMatch[1].trim();
     }
-    
-    // For direct array response (old format)
+
+    const jsonResponse = JSON.parse(cleanContent);
+
+    // Primary format from Structured Outputs schema: { categories: [{category, words}] }
+    if (jsonResponse.categories && Array.isArray(jsonResponse.categories)) {
+      return jsonResponse.categories;
+    }
+
+    // Fallback: direct array
     if (Array.isArray(jsonResponse)) {
       return jsonResponse.map(item => {
-        const categoryKey = Object.keys(item).find(key => key.match(/^category\d*$/));
-        
-        if (categoryKey && categoryKey !== "category" && Array.isArray(item.words)) {
-          return {
-            category: item[categoryKey],
-            words: item.words
-          };
+        // Handle legacy category1/category2/... keys
+        const categoryKey = Object.keys(item).find(key => key.match(/^category\d+$/));
+        if (categoryKey && Array.isArray(item.words)) {
+          return { category: item[categoryKey], words: item.words };
         }
-        
         return item;
       });
     }
 
-    // For response_format: { type: "json_object" }
+    // Fallback: any top-level array property
     for (const key in jsonResponse) {
-      if (Array.isArray(jsonResponse[key])) {
-        const arrayProperty = jsonResponse[key];
-        const transformedArray = arrayProperty.map(item => {
-          const categoryKey = Object.keys(item).find(key => key.match(/^category\d*$/));
-          
-          if (categoryKey && categoryKey !== "category" && Array.isArray(item.words)) {
-            return {
-              category: item[categoryKey],
-              words: item.words
-            };
-          }
-          
-          return item;
-        });
-        
-        if (transformedArray.length > 0 && 
-            (transformedArray[0].category || Object.keys(transformedArray[0]).some(k => k.match(/^category\d*$/)))) {
-          console.log("Found categories array in property:", key);
-          return transformedArray;
+      if (Array.isArray(jsonResponse[key]) && jsonResponse[key].length > 0) {
+        const first = jsonResponse[key][0];
+        if (first.category || Object.keys(first).some(k => k.match(/^category\d*$/))) {
+          return jsonResponse[key];
         }
       }
     }
-    
-    // Fallback to text parsing
-    const lines = content.split('\n').filter(line => line.trim());
-    const categories: Array<{category: string; words: string[]}> = [];
-    let currentCategory = '';
-    
-    for (const line of lines) {
-      if (line.includes('**') || line.includes(':')) {
-        const categoryMatch = line.match(/\*\*(.*?)\*\*|(.+?):/);
-        if (categoryMatch) {
-          currentCategory = (categoryMatch[1] || categoryMatch[2]).trim();
-          const wordsLine = line.replace(/\*\*(.*?)\*\*:?|(.+?):/, '').trim();
-          
-          if (wordsLine) {
-            const words = wordsLine.split(/,\s*/).map(word => word.trim()).filter(Boolean);
-            categories.push({ category: currentCategory, words });
-          } else {
-            categories.push({ category: currentCategory, words: [] });
-          }
-        }
-      } else if (currentCategory && categories.length > 0) {
-        const words = line.split(/,\s*/).map(word => word.trim()).filter(Boolean);
-        const lastCategory = categories[categories.length - 1];
-        lastCategory.words = [...lastCategory.words, ...words];
-      }
-    }
-    
-    return categories;
+
+    return [];
   } catch (error) {
     console.error("Error parsing OpenAI response:", error);
     return [];
@@ -173,34 +122,9 @@ const parseOpenAIResponse = (content: string): Array<{category: string; words: s
 
 const defaultSystemJsonInstruction = `
 ===== System Instructions =====
-IMPORTANT:
-0. Return a list of categories with words. Every item in the list is dict with two keys: "category" and "words".
-1. Make sure the structure is valid with double quotes ("") around all property names and string values.
-2. The "category" property must be surrounded by double quotes.
-3. The "words" property must be surrounded by double quotes.
-4. Each word in the words array must be surrounded by double quotes.
-5. Ensure the JSON formatting is correct, including commas between items and structural validity.
-6. Do not include control characters or unencoded special characters within strings.
-7. IF YOU WILL RESPOND WITH ONLY A SINGLE CATEGORY, I WILL BE VERY ANGRY and VERY DISAPPOINTED. THE SUCCESS OF THIS INJURED MAN IS DEPENDS ON IT.
-Please return only a valid JSON structure.
-IMPORTANT: Please return the answer in JSON format only according to the following structure:
-example:
-{"categories":
-[
-  {
-    "category1": "שם הקטגוריה",
-    "words": ["מילה1", "מילה2", "מילה3", "מילה4", "מילה5", "מילה6", "מילה7", "מילה8", "מילה9", "מילה10"]
-  },
-  {
-    "category2": "שם קטגוריה אחרת",
-    "words": ["מילה1", "מילה2", "מילה3", "מילה4", "מילה5", "מילה6", "מילה7", "מילה8"]
-  },
-  {
-    "category3": "שם קטגוריה שלישי",
-    "words": ["מילה1", "מילה2", "מילה3", "מילה4", "מילה5", "מילה6", "מילה7", "מילה8"]
-  }
-]
-}
+Return multiple categories (at least 3) of relevant words based on the patient's input.
+Each category must have a "category" name and a "words" array of 8–10 words.
+Do NOT return only a single category.
 `;
 
 serve(async (req) => {
@@ -280,7 +204,7 @@ serve(async (req) => {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'gpt-4o',
+        model: 'gpt-4o-mini',
         messages: [
           {
             role: 'system',
@@ -293,7 +217,32 @@ serve(async (req) => {
         ],
         temperature: 0.7,
         stream: isStreaming,
-        response_format: { type: "json_object" }
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "word_categories",
+            strict: true,
+            schema: {
+              type: "object",
+              properties: {
+                categories: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      category: { type: "string" },
+                      words: { type: "array", items: { type: "string" } }
+                    },
+                    required: ["category", "words"],
+                    additionalProperties: false
+                  }
+                }
+              },
+              required: ["categories"],
+              additionalProperties: false
+            }
+          }
+        }
       })
     });
     
@@ -327,113 +276,83 @@ serve(async (req) => {
           }
           
           let fullResponse = '';
-          const processedCategories = new Set<string>();
-          
+          const emittedCategories = new Set<string>();
+
+          // Emit a category over the stream and track it
+          const emitCategory = (category: { category: string; words: string[] }) => {
+            if (emittedCategories.has(category.category)) return;
+            emittedCategories.add(category.category);
+            controller.enqueue(encoder.encode(
+              `data: ${JSON.stringify({ type: 'category', data: category })}\n\n`
+            ));
+          };
+
+          // Regex to match a complete {"category":"...","words":[...]} object as it streams in.
+          // Words are simple strings (no nested brackets), so [^\]]* is safe.
+          const categoryPattern = /\{"category"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"words"\s*:\s*\[([^\]]*)\]\s*\}/g;
+
+          const tryEmitFromBuffer = () => {
+            categoryPattern.lastIndex = 0;
+            let match: RegExpExecArray | null;
+            while ((match = categoryPattern.exec(fullResponse)) !== null) {
+              try {
+                const parsed = JSON.parse(match[0]);
+                emitCategory(parsed);
+              } catch {
+                // incomplete or malformed — skip
+              }
+            }
+          };
+
           try {
+            const decoder = new TextDecoder('utf-8', { fatal: false });
+            let lineBuffer = '';
+
             while (true) {
               const { done, value } = await reader.read();
               if (done) break;
-              
-              const chunk = new TextDecoder().decode(value);
-              const lines = chunk.split('\n');
-              
+
+              // { stream: true } keeps the decoder stateful so multi-byte
+              // Hebrew characters split across chunk boundaries are reassembled
+              lineBuffer += decoder.decode(value, { stream: true });
+              const lines = lineBuffer.split('\n');
+              lineBuffer = lines.pop() ?? '';
+
               for (const line of lines) {
-                if (line.trim() === '') continue;
-                
-                if (line.startsWith('data: ')) {
-                  const data = line.slice(6);
-                  
-                  if (data === '[DONE]') {
-                    // Process final response
-                    if (fullResponse.trim()) {
-                      console.log('Processing final response:', fullResponse);
-                      const categories = parseOpenAIResponse(fullResponse);
-                      
-                      // Send any categories we haven't sent yet
-                      for (const category of categories) {
-                        if (!processedCategories.has(category.category)) {
-                          processedCategories.add(category.category);
-                          const chunk = `data: ${JSON.stringify({
-                            type: 'category',
-                            data: category
-                          })}\n\n`;
-                          controller.enqueue(encoder.encode(chunk));
-                        }
-                      }
-                    }
-                    
-                    controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-                    controller.close();
-                    return;
+                if (!line.startsWith('data: ')) continue;
+
+                const data = line.slice(6).trim();
+                if (data === '[DONE]') {
+                  // Emit any categories not yet streamed (safety net)
+                  const allCategories = parseOpenAIResponse(fullResponse);
+                  for (const category of allCategories) emitCategory(category);
+
+                  controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                  controller.close();
+                  return;
+                }
+
+                try {
+                  const json = JSON.parse(data);
+                  const token = json.choices?.[0]?.delta?.content;
+                  if (token) {
+                    fullResponse += token;
+                    tryEmitFromBuffer();
                   }
-                  
-                  try {
-                    const json = JSON.parse(data);
-                    const content = json.choices[0]?.delta?.content || '';
-                    
-                    if (content) {
-                      fullResponse += content;
-                      
-                      // Try to extract complete categories as they come in
-                      const categoryMatches = fullResponse.match(/"(category\d*)"\s*:\s*"([^"]*)"/g);
-                      const wordsMatches = fullResponse.match(/"words"\s*:\s*\[((?:"[^"]*"(?:,\s*)?)+)\]/g);
-                      
-                      if (categoryMatches && wordsMatches && categoryMatches.length === wordsMatches.length) {
-                        for (let i = 0; i < categoryMatches.length; i++) {
-                          try {
-                            const matches = categoryMatches[i].match(/"(category\d*)"\s*:\s*"([^"]*)"/);
-                            if (!matches) continue;
-                            
-                            const categoryName = matches[2];
-                            
-                            if (processedCategories.has(categoryName)) continue;
-                            
-                                                         const wordsMatch = wordsMatches[i].match(/"words"\s*:\s*\[((?:"[^"]*"(?:,\s*)?)+)\]/);
-                             if (!wordsMatch) continue;
-                             const wordsArrayString = wordsMatch[1];
-                            const words = wordsArrayString.split(',')
-                              .map(w => w.trim().replace(/^"(.*)"$/, '$1'))
-                              .filter(w => w);
-                            
-                            if (categoryName && words.length > 0) {
-                              processedCategories.add(categoryName);
-                              const category = {
-                                category: categoryName,
-                                words: words
-                              };
-                              
-                              console.log("Sending category via stream:", categoryName);
-                              const chunk = `data: ${JSON.stringify({
-                                type: 'category',
-                                data: category
-                              })}\n\n`;
-                              controller.enqueue(encoder.encode(chunk));
-                            }
-                          } catch (e) {
-                            // Skip parsing errors
-                          }
-                        }
-                      }
-                    }
-                  } catch (e) {
-                    // Ignore parse errors in streaming
-                  }
+                } catch {
+                  // skip malformed SSE chunk
                 }
               }
             }
           } catch (error) {
             console.error('Error processing stream:', error);
-            
-            // Fallback to mock data on streaming error
+
             const mockData = getMockResponse(prompt);
             for (const category of mockData) {
-              const chunk = `data: ${JSON.stringify({
-                type: 'category',
-                data: category
-              })}\n\n`;
-              controller.enqueue(encoder.encode(chunk));
+              controller.enqueue(encoder.encode(
+                `data: ${JSON.stringify({ type: 'category', data: category })}\n\n`
+              ));
             }
-            
             controller.enqueue(encoder.encode('data: [DONE]\n\n'));
             controller.close();
           }
